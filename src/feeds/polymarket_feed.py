@@ -91,8 +91,11 @@ class PolymarketFeed:
             try:
                 book = await asyncio.to_thread(self._clob.get_order_book, token_id)
                 total = 0.0
-                for side in ("bids", "asks"):
-                    for level in (book.get(side) or [])[:5]:
+                for side_key in ("bids", "asks"):
+                    entries = book.get(side_key) or []
+                    if not isinstance(entries, list):
+                        continue
+                    for level in entries[:5]:
                         price = float(level.get("price", 0))
                         size = float(level.get("size", 0))
                         total += price * size
@@ -118,7 +121,7 @@ class PolymarketFeed:
         async with httpx.AsyncClient(timeout=10) as http:
             for asset in ASSETS:
                 for tf, interval in SLUG_INTERVALS.items():
-                    for offset in (0, -1):
+                    for offset in (0, -1, 1):
                         ts = int(math.floor(now / interval) * interval) + offset * interval
                         slug = f"{asset}-updown-{tf}-{ts}"
                         try:
@@ -128,15 +131,13 @@ class PolymarketFeed:
                                     params={"slug": slug},
                                 )
                             if resp.status_code != 200:
-                                logger.debug("Slug lookup %s: HTTP %d", slug, resp.status_code)
                                 continue
                             data = resp.json()
                             if not data:
-                                logger.debug("Slug lookup %s: empty response", slug)
                                 continue
                             items = data if isinstance(data, list) else [data]
                             for item in items:
-                                cid = item.get("condition_id", "")
+                                cid = item.get("conditionId", item.get("condition_id", ""))
                                 if not cid:
                                     continue
                                 if cid in self._markets:
@@ -144,11 +145,11 @@ class PolymarketFeed:
                                 market = self._parse_market(item, asset.upper(), tf, slug)
                                 if market:
                                     found.append(market)
-                                    logger.info("Slug found market: %s (cid=%s)", slug, cid[:12])
-                                else:
-                                    logger.debug(
-                                        "Slug %s: parse failed for cid=%s q=%s",
-                                        slug, cid[:12], item.get("question", "")[:60],
+                                    logger.info(
+                                        "Market found: %s %s-%s end=%s strike=$%.2f",
+                                        slug, asset.upper(), tf,
+                                        time.strftime("%H:%M:%S", time.gmtime(market.end_time)),
+                                        market.strike_price,
                                     )
                         except Exception as exc:
                             logger.debug("Slug lookup failed for %s: %s", slug, exc)
@@ -168,14 +169,12 @@ class PolymarketFeed:
                             params=search_params,
                         )
                     if resp.status_code != 200:
-                        logger.debug("Tag search HTTP %d for params %s", resp.status_code, search_params)
                         continue
                     events = resp.json()
                     if not isinstance(events, list):
                         events = [events]
-                    logger.debug("Tag search returned %d events (params=%s)", len(events), search_params)
                     for event in events:
-                        event_title = (event.get("title") or event.get("question") or "").lower()
+                        event_title = (event.get("title") or "").lower()
                         markets = event.get("markets", [])
                         if not isinstance(markets, list):
                             continue
@@ -197,12 +196,12 @@ class PolymarketFeed:
                                 tf = "15m"
                             else:
                                 continue
-                            if not item.get("accepting_orders", True):
+                            if not item.get("acceptingOrders", item.get("accepting_orders", True)):
                                 continue
-                            cid = item.get("condition_id", "")
+                            cid = item.get("conditionId", item.get("condition_id", ""))
                             if cid in self._markets:
                                 continue
-                            slug = item.get("market_slug", item.get("slug", ""))
+                            slug = item.get("slug", item.get("market_slug", ""))
                             market = self._parse_market(item, asset, tf, slug)
                             if market:
                                 found.append(market)
@@ -217,71 +216,87 @@ class PolymarketFeed:
         self, data: dict, asset: str, timeframe: str, slug: str
     ) -> MarketInfo | None:
         try:
-            condition_id = data.get("condition_id", "")
+            condition_id = data.get("conditionId", data.get("condition_id", ""))
             if not condition_id:
                 return None
 
             question = data.get("question", "")
-            tokens = data.get("tokens", [])
-            if not tokens or len(tokens) < 2:
-                clobTokenIds = data.get("clobTokenIds")
-                if clobTokenIds and len(clobTokenIds) >= 2:
-                    tokens = [
-                        {"token_id": clobTokenIds[0], "outcome": "Yes"},
-                        {"token_id": clobTokenIds[1], "outcome": "No"},
-                    ]
-                else:
-                    return None
 
-            yes_token = None
-            no_token = None
-            for t in tokens:
-                outcome = (t.get("outcome") or "").lower()
-                if outcome in ("yes", "up"):
-                    yes_token = t
-                elif outcome in ("no", "down"):
-                    no_token = t
-            if not yes_token or not no_token:
-                if len(tokens) >= 2:
-                    yes_token = tokens[0]
-                    no_token = tokens[1]
-                else:
-                    return None
+            outcomes = data.get("outcomes") or []
+            outcome_prices = data.get("outcomePrices") or []
+            clob_token_ids = data.get("clobTokenIds") or []
+            tokens = data.get("tokens") or []
 
-            yes_token_id = yes_token.get("token_id", "")
-            no_token_id = no_token.get("token_id", "")
+            yes_token_id = ""
+            no_token_id = ""
+            yes_price = 0.5
+            no_price = 0.5
+
+            if clob_token_ids and len(clob_token_ids) >= 2 and outcomes:
+                for i, outcome in enumerate(outcomes):
+                    ol = outcome.lower()
+                    price = float(outcome_prices[i]) if i < len(outcome_prices) else 0.5
+                    tid = clob_token_ids[i] if i < len(clob_token_ids) else ""
+                    if ol in ("up", "yes"):
+                        yes_token_id = tid
+                        yes_price = price
+                    elif ol in ("down", "no"):
+                        no_token_id = tid
+                        no_price = price
+                if not yes_token_id and len(clob_token_ids) >= 2:
+                    yes_token_id = clob_token_ids[0]
+                    no_token_id = clob_token_ids[1]
+                    if len(outcome_prices) >= 2:
+                        yes_price = float(outcome_prices[0])
+                        no_price = float(outcome_prices[1])
+            elif tokens and len(tokens) >= 2:
+                for t in tokens:
+                    outcome = (t.get("outcome") or "").lower()
+                    if outcome in ("yes", "up"):
+                        yes_token_id = t.get("token_id", "")
+                        yes_price = float(t.get("price", 0.5))
+                    elif outcome in ("no", "down"):
+                        no_token_id = t.get("token_id", "")
+                        no_price = float(t.get("price", 0.5))
+                if not yes_token_id and len(tokens) >= 2:
+                    yes_token_id = tokens[0].get("token_id", "")
+                    no_token_id = tokens[1].get("token_id", "")
+                    yes_price = float(tokens[0].get("price", 0.5))
+                    no_price = float(tokens[1].get("price", 0.5))
+
             if not yes_token_id or not no_token_id:
+                logger.debug("No token IDs for %s", slug)
                 return None
 
-            yes_price = float(yes_token.get("price", 0.5))
-            no_price = float(no_token.get("price", 0.5))
-
-            end_ts = data.get("end_date_iso")
+            end_ts = data.get("endDate", data.get("endDateIso", data.get("end_date_iso")))
             if end_ts:
                 from datetime import datetime, timezone
-
-                end_time = datetime.fromisoformat(
-                    end_ts.replace("Z", "+00:00")
-                ).timestamp()
+                clean = end_ts.replace("Z", "+00:00")
+                if "T" not in clean:
+                    clean = clean + "T23:59:59+00:00"
+                end_time = datetime.fromisoformat(clean).timestamp()
             else:
                 interval = SLUG_INTERVALS.get(timeframe, 300)
                 end_time = time.time() + interval
+
+            if end_time < time.time():
+                logger.debug("Market %s already expired (end=%s)", slug, end_ts)
+                return None
 
             strike_price = 0.0
             match = PRICE_RE.search(question)
             if match:
                 strike_price = float(match.group(1).replace(",", ""))
 
-            tick_size = "0.01"
-            neg_risk = False
-            try:
-                tick_size = str(self._clob.get_tick_size(condition_id))
-            except Exception:
-                pass
-            try:
-                neg_risk = bool(self._clob.get_neg_risk(condition_id))
-            except Exception:
-                pass
+            if strike_price == 0.0:
+                desc = data.get("description", "")
+                match = PRICE_RE.search(desc or "")
+                if match:
+                    strike_price = float(match.group(1).replace(",", ""))
+
+            tick_size = data.get("orderPriceMinTickSize", "0.01")
+            neg_risk = data.get("negRisk", data.get("neg_risk", False))
+            min_order_size = float(data.get("orderMinSize", 5))
 
             return MarketInfo(
                 condition_id=condition_id,
@@ -295,11 +310,11 @@ class PolymarketFeed:
                 no_price=no_price,
                 end_time=end_time,
                 strike_price=strike_price,
-                tick_size=tick_size,
-                neg_risk=neg_risk,
-                min_order_size=1.0,
+                tick_size=str(tick_size),
+                neg_risk=bool(neg_risk),
+                min_order_size=min_order_size,
                 last_updated=time.time(),
             )
         except Exception as exc:
-            logger.debug("Failed to parse market: %s", exc)
+            logger.warning("Failed to parse market %s: %s", slug, exc)
             return None

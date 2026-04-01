@@ -90,9 +90,6 @@ class SignalEngine:
         return signals
 
     async def _evaluate(self, market: MarketInfo) -> Signal | None:
-        if market.strike_price <= 0:
-            return None
-
         price_state = self._binance.get_price(market.asset)
         if price_state.current_price <= 0:
             return None
@@ -103,9 +100,14 @@ class SignalEngine:
             return None
 
         total_duration = float(SLUG_INTERVALS.get(market.timeframe, 300))
+
+        strike = market.strike_price
+        if strike <= 0:
+            strike = price_state.current_price
+
         implied_prob = calculate_implied_probability(
             current_price=price_state.current_price,
-            strike_price=market.strike_price,
+            strike_price=strike,
             time_remaining_seconds=time_remaining,
             volatility_per_second=price_state.volatility,
         )
@@ -126,8 +128,8 @@ class SignalEngine:
             return None
 
         price_distance_pct = (
-            abs(price_state.current_price - market.strike_price)
-            / market.strike_price
+            abs(price_state.current_price - strike) / strike
+            if strike > 0 else 0.0
         )
 
         token_id = (

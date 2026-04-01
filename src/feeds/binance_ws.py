@@ -117,7 +117,7 @@ class BinanceFeed:
                 return
             except Exception as exc:
                 logger.debug("REST fallback error: %s", exc)
-            await asyncio.sleep(3)
+            await asyncio.sleep(15)
 
     async def _fetch_rest_prices(self) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -125,6 +125,10 @@ class BinanceFeed:
                 REST_FALLBACK_URL,
                 params={"ids": "bitcoin,ethereum", "vs_currencies": "usd"},
             )
+            if resp.status_code == 429:
+                logger.debug("CoinGecko rate limited, backing off")
+                await asyncio.sleep(30)
+                return
             if resp.status_code != 200:
                 logger.debug("CoinGecko REST returned %d", resp.status_code)
                 return
