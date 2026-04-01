@@ -278,6 +278,8 @@ class WebDashboard:
                         continue
                     if sig.market.condition_id in self.risk.open_positions:
                         continue
+                    if len(self.risk.open_positions) >= self.settings.max_concurrent_positions:
+                        break
 
                     self._log(
                         f"EXECUTING: {sig.market.asset}-{sig.market.timeframe} "

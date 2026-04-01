@@ -28,6 +28,7 @@ class Settings:
     max_position_pct: float = 0.08
     min_confidence: float = 0.60
     kelly_fraction: float = 0.5
+    max_concurrent_positions: int = 3
 
     max_daily_drawdown: float = 0.20
     initial_portfolio_value: float = field(

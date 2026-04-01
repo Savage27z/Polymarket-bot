@@ -302,6 +302,10 @@ class PolybotApp(App):
                     if sig.market.condition_id in self.risk.open_positions:
                         continue
 
+                    if len(self.risk.open_positions) >= self.settings.max_concurrent_positions:
+                        break
+                        continue
+
                     self._log(
                         f"[bold green]EXECUTING: {sig.market.asset}-{sig.market.timeframe} "
                         f"{sig.side} edge={sig.edge:.1%} conf={sig.confidence:.0%}[/]"
