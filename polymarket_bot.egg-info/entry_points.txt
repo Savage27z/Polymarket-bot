@@ -1,0 +1,2 @@
+[console_scripts]
+polybot = src.main:main
