@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.env
+polybot_trades.db
+polybot.log
+.venv/
+venv/
