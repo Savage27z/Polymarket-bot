@@ -16,7 +16,9 @@ class Settings:
     )
     poly_host: str = "https://clob.polymarket.com"
     poly_chain_id: int = 137
-    poly_signature_type: int = 0
+    poly_signature_type: int = field(
+        default_factory=lambda: int(os.getenv("POLY_SIGNATURE_TYPE", "0"))
+    )
 
     binance_ws_url: str = "wss://stream.binance.com:9443"
 
