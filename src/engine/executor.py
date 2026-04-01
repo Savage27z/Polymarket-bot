@@ -3,7 +3,7 @@ import logging
 import time
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
 
 from src.config import Settings
 from src.engine.signals import Signal
@@ -124,11 +124,10 @@ class Executor:
                 size=size,
                 side="BUY",
             ),
-            {
-                "tickSize": signal.market.tick_size,
-                "negRisk": signal.market.neg_risk,
-            },
-            OrderType.FOK,
+            PartialCreateOrderOptions(
+                tick_size=signal.market.tick_size,
+                neg_risk=signal.market.neg_risk,
+            ),
         )
 
         order_id = ""
