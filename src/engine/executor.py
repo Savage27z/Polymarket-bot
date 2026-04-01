@@ -115,6 +115,12 @@ class Executor:
         order_price = round(min(price + 0.01, 0.99), 2)
         size = round(signal.recommended_size / order_price, 2) if order_price > 0 else 0
 
+        min_shares = max(float(signal.market.min_order_size), 5.0)
+        min_usdc = max(min_shares * order_price, 1.0)
+        if size < min_shares:
+            size = min_shares
+        actual_usdc = round(size * order_price, 2)
+
         if size <= 0:
             return {"success": False, "error": "calculated_size_zero"}
 
@@ -153,6 +159,6 @@ class Executor:
             "side": signal.side,
             "price": order_price,
             "size_shares": size,
-            "size_usdc": signal.recommended_size,
+            "size_usdc": actual_usdc,
             "response": resp,
         }

@@ -26,7 +26,7 @@ class Settings:
 
     min_edge_detection: float = 0.01
     min_edge_execution: float = 0.02
-    max_position_usdc: float = 2.0
+    max_position_usdc: float = 5.0
     max_position_pct: float = 0.08
     min_confidence: float = 0.50
     kelly_fraction: float = 0.5
