@@ -22,11 +22,11 @@ class Settings:
 
     gamma_api_url: str = "https://gamma-api.polymarket.com"
 
-    min_edge_detection: float = 0.02
-    min_edge_execution: float = 0.03
+    min_edge_detection: float = 0.01
+    min_edge_execution: float = 0.02
     max_position_usdc: float = 1.0
     max_position_pct: float = 0.08
-    min_confidence: float = 0.60
+    min_confidence: float = 0.50
     kelly_fraction: float = 0.5
     max_concurrent_positions: int = 3
 
