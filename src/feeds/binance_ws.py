@@ -5,12 +5,20 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+import httpx
 import numpy as np
 import websockets
 
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
+
+WS_ENDPOINTS = [
+    "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade",
+    "wss://stream.binance.us:9443/stream?streams=btcusdt@trade/ethusdt@trade",
+]
+
+REST_FALLBACK_URL = "https://api.coingecko.com/api/v3/simple/price"
 
 
 @dataclass
@@ -45,6 +53,8 @@ class BinanceFeed:
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        self._rest_task: asyncio.Task | None = None
+        self._ws_connected = False
 
     def get_price(self, symbol: str) -> PriceState:
         return self._prices.get(symbol.upper(), PriceState())
@@ -52,45 +62,95 @@ class BinanceFeed:
     async def start(self) -> None:
         self._running = True
         self._task = asyncio.create_task(self._run_forever())
+        self._rest_task = asyncio.create_task(self._rest_fallback_loop())
 
     async def stop(self) -> None:
         self._running = False
         if self._ws:
             await self._ws.close()
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._rest_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _run_forever(self) -> None:
-        backoff = 1.0
-        url = (
-            f"{self._settings.binance_ws_url}"
-            "/stream?streams=btcusdt@trade/ethusdt@trade"
-        )
+        while self._running:
+            for url in WS_ENDPOINTS:
+                if not self._running:
+                    return
+                try:
+                    logger.info("Trying WebSocket: %s", url.split("/stream")[0])
+                    async with websockets.connect(
+                        url, ping_interval=30, ping_timeout=10
+                    ) as ws:
+                        self._ws = ws
+                        self._ws_connected = True
+                        logger.info("WebSocket connected: %s", url.split("/stream")[0])
+                        await self._consume(ws)
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.warning("WebSocket failed (%s): %s", url.split("/stream")[0], exc)
+                    self._ws_connected = False
+                    continue
+
+            if not self._running:
+                return
+            logger.warning("All WebSocket endpoints failed, retrying in 10s (REST fallback active)")
+            await asyncio.sleep(10)
+
+    async def _rest_fallback_loop(self) -> None:
+        await asyncio.sleep(5)
         while self._running:
             try:
-                async with websockets.connect(
-                    url, ping_interval=30, ping_timeout=10
-                ) as ws:
-                    self._ws = ws
-                    backoff = 1.0
-                    logger.info("Binance WebSocket connected")
-                    await self._consume(ws)
+                if self._ws_connected:
+                    btc = self._prices["BTC"]
+                    if btc.last_update > 0 and (time.time() - btc.last_update) < 5:
+                        await asyncio.sleep(3)
+                        continue
+
+                await self._fetch_rest_prices()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                if not self._running:
-                    return
-                logger.warning(
-                    "Binance WS disconnected (%s), reconnecting in %.0fs",
-                    exc,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+                logger.debug("REST fallback error: %s", exc)
+            await asyncio.sleep(3)
+
+    async def _fetch_rest_prices(self) -> None:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                REST_FALLBACK_URL,
+                params={"ids": "bitcoin,ethereum", "vs_currencies": "usd"},
+            )
+            if resp.status_code != 200:
+                logger.debug("CoinGecko REST returned %d", resp.status_code)
+                return
+            data = resp.json()
+            ts = time.time()
+
+            btc_price = data.get("bitcoin", {}).get("usd")
+            eth_price = data.get("ethereum", {}).get("usd")
+
+            async with self._lock:
+                if btc_price:
+                    state = self._prices["BTC"]
+                    state.current_price = float(btc_price)
+                    state.last_update = ts
+                    state.prices.append(float(btc_price))
+                    state.timestamps.append(ts)
+                if eth_price:
+                    state = self._prices["ETH"]
+                    state.current_price = float(eth_price)
+                    state.last_update = ts
+                    state.prices.append(float(eth_price))
+                    state.timestamps.append(ts)
+
+            source = "REST/CoinGecko"
+            if btc_price:
+                logger.info("Price update (%s): BTC=$%s ETH=$%s", source, btc_price, eth_price)
 
     async def _consume(self, ws: websockets.WebSocketClientProtocol) -> None:
         async for raw in ws:

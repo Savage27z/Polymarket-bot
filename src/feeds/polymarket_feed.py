@@ -118,73 +118,97 @@ class PolymarketFeed:
         async with httpx.AsyncClient(timeout=10) as http:
             for asset in ASSETS:
                 for tf, interval in SLUG_INTERVALS.items():
-                    ts = int(math.floor(now / interval) * interval)
-                    slug = f"{asset}-updown-{tf}-{ts}"
-                    try:
-                        async with self._gamma_semaphore:
-                            resp = await http.get(
-                                f"{self._settings.gamma_api_url}/markets",
-                                params={"slug": slug},
-                            )
-                        if resp.status_code != 200:
-                            continue
-                        data = resp.json()
-                        items = data if isinstance(data, list) else [data]
-                        for item in items:
-                            market = self._parse_market(item, asset.upper(), tf, slug)
-                            if market:
-                                found.append(market)
-                    except Exception as exc:
-                        logger.debug("Slug lookup failed for %s: %s", slug, exc)
+                    for offset in (0, -1):
+                        ts = int(math.floor(now / interval) * interval) + offset * interval
+                        slug = f"{asset}-updown-{tf}-{ts}"
+                        try:
+                            async with self._gamma_semaphore:
+                                resp = await http.get(
+                                    f"{self._settings.gamma_api_url}/markets",
+                                    params={"slug": slug},
+                                )
+                            if resp.status_code != 200:
+                                logger.debug("Slug lookup %s: HTTP %d", slug, resp.status_code)
+                                continue
+                            data = resp.json()
+                            if not data:
+                                logger.debug("Slug lookup %s: empty response", slug)
+                                continue
+                            items = data if isinstance(data, list) else [data]
+                            for item in items:
+                                cid = item.get("condition_id", "")
+                                if not cid:
+                                    continue
+                                if cid in self._markets:
+                                    continue
+                                market = self._parse_market(item, asset.upper(), tf, slug)
+                                if market:
+                                    found.append(market)
+                                    logger.info("Slug found market: %s (cid=%s)", slug, cid[:12])
+                                else:
+                                    logger.debug(
+                                        "Slug %s: parse failed for cid=%s q=%s",
+                                        slug, cid[:12], item.get("question", "")[:60],
+                                    )
+                        except Exception as exc:
+                            logger.debug("Slug lookup failed for %s: %s", slug, exc)
         return found
 
     async def _tag_search(self) -> list[MarketInfo]:
         found: list[MarketInfo] = []
         try:
             async with httpx.AsyncClient(timeout=10) as http:
-                async with self._gamma_semaphore:
-                    resp = await http.get(
-                        f"{self._settings.gamma_api_url}/events",
-                        params={
-                            "tag": "crypto",
-                            "active": "true",
-                            "closed": "false",
-                            "limit": "50",
-                        },
-                    )
-                if resp.status_code != 200:
-                    return found
-                events = resp.json()
-                if not isinstance(events, list):
-                    events = [events]
-                for event in events:
-                    markets = event.get("markets", [])
-                    if not isinstance(markets, list):
+                for search_params in (
+                    {"tag": "crypto", "active": "true", "closed": "false", "limit": "50"},
+                    {"active": "true", "closed": "false", "limit": "100"},
+                ):
+                    async with self._gamma_semaphore:
+                        resp = await http.get(
+                            f"{self._settings.gamma_api_url}/events",
+                            params=search_params,
+                        )
+                    if resp.status_code != 200:
+                        logger.debug("Tag search HTTP %d for params %s", resp.status_code, search_params)
                         continue
-                    for item in markets:
-                        q = (item.get("question") or "").lower()
-                        desc = (item.get("description") or "").lower()
-                        text = f"{q} {desc}"
-                        asset = ""
-                        if any(k in text for k in ("btc", "bitcoin")):
-                            asset = "BTC"
-                        elif any(k in text for k in ("eth", "ethereum")):
-                            asset = "ETH"
-                        else:
+                    events = resp.json()
+                    if not isinstance(events, list):
+                        events = [events]
+                    logger.debug("Tag search returned %d events (params=%s)", len(events), search_params)
+                    for event in events:
+                        event_title = (event.get("title") or event.get("question") or "").lower()
+                        markets = event.get("markets", [])
+                        if not isinstance(markets, list):
                             continue
-                        tf = ""
-                        if any(k in text for k in ("5 minute", "5m")):
-                            tf = "5m"
-                        elif any(k in text for k in ("15 minute", "15m")):
-                            tf = "15m"
-                        else:
-                            continue
-                        if not item.get("accepting_orders", True):
-                            continue
-                        slug = item.get("market_slug", item.get("slug", ""))
-                        market = self._parse_market(item, asset, tf, slug)
-                        if market:
-                            found.append(market)
+                        for item in markets:
+                            q = (item.get("question") or "").lower()
+                            desc = (item.get("description") or "").lower()
+                            text = f"{q} {desc} {event_title}"
+                            asset = ""
+                            if any(k in text for k in ("btc", "bitcoin")):
+                                asset = "BTC"
+                            elif any(k in text for k in ("eth", "ethereum")):
+                                asset = "ETH"
+                            else:
+                                continue
+                            tf = ""
+                            if any(k in text for k in ("5 minute", "5m", "5-min")):
+                                tf = "5m"
+                            elif any(k in text for k in ("15 minute", "15m", "15-min")):
+                                tf = "15m"
+                            else:
+                                continue
+                            if not item.get("accepting_orders", True):
+                                continue
+                            cid = item.get("condition_id", "")
+                            if cid in self._markets:
+                                continue
+                            slug = item.get("market_slug", item.get("slug", ""))
+                            market = self._parse_market(item, asset, tf, slug)
+                            if market:
+                                found.append(market)
+                                logger.info("Tag search found: %s-%s q=%s", asset, tf, q[:60])
+                    if found:
+                        break
         except Exception as exc:
             logger.debug("Tag search failed: %s", exc)
         return found
