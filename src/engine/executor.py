@@ -12,13 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 def create_trading_client(settings: Settings) -> ClobClient:
-    client = ClobClient(
-        host=settings.poly_host,
-        chain_id=settings.poly_chain_id,
-        key=settings.poly_private_key,
-        signature_type=settings.poly_signature_type,
-        funder=settings.poly_funder_address,
-    )
+    kwargs = {
+        "host": settings.poly_host,
+        "chain_id": settings.poly_chain_id,
+        "key": settings.poly_private_key,
+        "signature_type": settings.poly_signature_type,
+    }
+    if settings.poly_funder_address:
+        kwargs["funder"] = settings.poly_funder_address
+    client = ClobClient(**kwargs)
     client.set_api_creds(client.create_or_derive_api_creds())
     return client
 

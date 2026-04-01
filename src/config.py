@@ -16,7 +16,7 @@ class Settings:
     )
     poly_host: str = "https://clob.polymarket.com"
     poly_chain_id: int = 137
-    poly_signature_type: int = 1
+    poly_signature_type: int = 0
 
     binance_ws_url: str = "wss://stream.binance.com:9443"
 
