@@ -53,6 +53,7 @@ class Position:
     opened_at: float
     end_time: float
     dry_run: bool = False
+    trade_db_id: int | None = None
 
 
 @dataclass

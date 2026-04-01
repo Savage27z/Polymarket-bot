@@ -111,6 +111,7 @@ class PolybotApp(App):
         self.db = db
         self._latest_signals: list[Signal] = []
         self._log_widget: RichLog | None = None
+        self._kill_switch_alerted: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -302,7 +303,7 @@ class PolybotApp(App):
 
                     if result.get("success"):
                         order_id = result.get("order_id", "")
-                        await self.db.log_trade({
+                        trade_db_id = await self.db.log_trade({
                             "timestamp": time.time(),
                             "market_condition_id": sig.market.condition_id,
                             "market_question": sig.market.question,
@@ -341,6 +342,7 @@ class PolybotApp(App):
                                 opened_at=time.time(),
                                 end_time=sig.market.end_time,
                                 dry_run=self.settings.dry_run,
+                                trade_db_id=trade_db_id,
                             )
                         )
 
@@ -366,7 +368,8 @@ class PolybotApp(App):
                 for threshold in alerts:
                     await self.telegram.drawdown_alert(threshold, pv)
                     self._log(f"[yellow]Drawdown alert: {threshold:.0%}[/]")
-                if self.risk.kill_switch_active:
+                if self.risk.kill_switch_active and not self._kill_switch_alerted:
+                    self._kill_switch_alerted = True
                     await self.telegram.kill_switch_alert()
                     self._log("[bold red]KILL SWITCH ACTIVATED[/]")
 
@@ -384,16 +387,39 @@ class PolybotApp(App):
                 now = time.time()
                 resolved: list[str] = []
                 for cid, pos in list(self.risk.open_positions.items()):
-                    if now <= pos.end_time + 30:
+                    if now <= pos.end_time + 60:
                         continue
-                    btc_state = self.binance.get_price(pos.asset)
-                    if btc_state.current_price <= 0:
+
+                    try:
+                        market_data = await asyncio.to_thread(
+                            self.polymarket._clob.get_market, pos.condition_id
+                        )
+                        if not market_data.get("closed", False):
+                            continue
+                        tokens = market_data.get("tokens", [])
+                        yes_won = any(
+                            t.get("winner", False)
+                            and t.get("outcome", "").lower() in ("yes", "up")
+                            for t in tokens
+                        )
+                        no_won = any(
+                            t.get("winner", False)
+                            and t.get("outcome", "").lower() in ("no", "down")
+                            for t in tokens
+                        )
+                        if not yes_won and not no_won:
+                            continue
+                        won = (pos.side == "YES" and yes_won) or (
+                            pos.side == "NO" and no_won
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Resolution check failed for %s: %s",
+                            pos.condition_id,
+                            exc,
+                        )
                         continue
-                    final_price = btc_state.current_price
-                    above_strike = final_price >= pos.strike_price
-                    won = (pos.side == "YES" and above_strike) or (
-                        pos.side == "NO" and not above_strike
-                    )
+
                     if won:
                         pnl = pos.size_usdc * ((1.0 / pos.entry_price) - 1.0)
                         status = "won"
@@ -402,7 +428,11 @@ class PolybotApp(App):
                         status = "lost"
 
                     self.risk.daily_pnl += pnl
-                    await self.db.update_trade_result(pos.order_id, status, final_price, pnl)
+                    if pos.trade_db_id:
+                        exit_price = 1.0 if won else 0.0
+                        await self.db.update_trade_result(
+                            pos.trade_db_id, status, exit_price, pnl
+                        )
                     resolved.append(cid)
                     self._log(
                         f"[{'green' if won else 'red'}]Resolved: {pos.asset}-{pos.timeframe} "
@@ -447,6 +477,8 @@ class PolybotApp(App):
 
     def action_toggle_kill(self) -> None:
         self.risk.kill_switch_active = not self.risk.kill_switch_active
+        if not self.risk.kill_switch_active:
+            self._kill_switch_alerted = False
         state = "ACTIVE" if self.risk.kill_switch_active else "INACTIVE"
         self._log(f"[yellow]Kill switch toggled: {state}[/]")
 

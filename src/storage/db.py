@@ -84,14 +84,14 @@ class Database:
             return None
 
     async def update_trade_result(
-        self, order_id: str, status: str, exit_price: float, pnl: float
+        self, trade_id: int, status: str, exit_price: float, pnl: float
     ) -> None:
         try:
             async with aiosqlite.connect(self._path) as db:
                 await db.execute(
                     "UPDATE trades SET status=?, exit_price=?, pnl=?, resolved_at=? "
-                    "WHERE order_id=?",
-                    (status, exit_price, pnl, __import__("time").time(), order_id),
+                    "WHERE id=?",
+                    (status, exit_price, pnl, __import__("time").time(), trade_id),
                 )
                 await db.commit()
         except Exception as exc:
