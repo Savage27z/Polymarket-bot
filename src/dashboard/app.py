@@ -285,6 +285,14 @@ class PolybotApp(App):
                 signals = await self.signal_engine.scan()
                 self._latest_signals = signals
 
+                if signals:
+                    best = max(signals, key=lambda s: abs(s.edge))
+                    self._log(
+                        f"[cyan]Signals: {len(signals)} | Best: {best.market.asset}-{best.market.timeframe} "
+                        f"{best.side} edge={best.edge:+.1%} conf={best.confidence:.0%} "
+                        f"CEX=${best.cex_price:,.2f} strike=${best.strike_price:,.2f}[/]"
+                    )
+
                 for sig in signals:
                     if not self.signal_engine.should_execute(
                         sig, self.risk.kill_switch_active

@@ -103,7 +103,12 @@ class SignalEngine:
 
         strike = market.strike_price
         if strike <= 0:
-            strike = price_state.current_price
+            market.strike_price = price_state.current_price
+            strike = market.strike_price
+            logger.info(
+                "Locked strike for %s-%s at $%.2f (CEX price at discovery)",
+                market.asset, market.timeframe, strike,
+            )
 
         implied_prob = calculate_implied_probability(
             current_price=price_state.current_price,
@@ -125,6 +130,14 @@ class SignalEngine:
             market_prob = market.no_price
 
         if abs(edge) < self._settings.min_edge_detection:
+            logger.debug(
+                "Edge below threshold for %s-%s: edge_yes=%.2f%% edge_no=%.2f%% "
+                "implied=%.1f%% mkt_yes=%.1f%% price=$%.2f strike=$%.2f",
+                market.asset, market.timeframe,
+                edge_yes * 100, edge_no * 100,
+                implied_prob * 100, market.yes_price * 100,
+                price_state.current_price, strike,
+            )
             return None
 
         price_distance_pct = (
