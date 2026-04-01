@@ -19,7 +19,7 @@ def create_trading_client(settings: Settings) -> ClobClient:
         signature_type=settings.poly_signature_type,
         funder=settings.poly_funder_address,
     )
-    client.set_api_creds(client.create_or_derive_api_key())
+    client.set_api_creds(client.create_or_derive_api_creds())
     return client
 
 
