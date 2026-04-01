@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import re
@@ -222,10 +223,14 @@ class PolymarketFeed:
 
             question = data.get("question", "")
 
-            outcomes = data.get("outcomes") or []
-            outcome_prices = data.get("outcomePrices") or []
-            clob_token_ids = data.get("clobTokenIds") or []
+            outcomes_raw = data.get("outcomes") or []
+            prices_raw = data.get("outcomePrices") or []
+            tokens_raw = data.get("clobTokenIds") or []
             tokens = data.get("tokens") or []
+
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            outcome_prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+            clob_token_ids = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
 
             yes_token_id = ""
             no_token_id = ""
