@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 import aiosqlite
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON portfolio_snapshots(timestamp);
 """
 
 
@@ -91,7 +93,7 @@ class Database:
                 await db.execute(
                     "UPDATE trades SET status=?, exit_price=?, pnl=?, resolved_at=? "
                     "WHERE id=?",
-                    (status, exit_price, pnl, __import__("time").time(), trade_id),
+                    (status, exit_price, pnl, time.time(), trade_id),
                 )
                 await db.commit()
         except Exception as exc:
@@ -139,7 +141,6 @@ class Database:
                 )
                 total_pnl = (await cursor.fetchone())[0]
 
-                closed = 0
                 cursor = await db.execute(
                     "SELECT COUNT(*) FROM trades WHERE status IN ('won', 'lost')"
                 )
@@ -147,22 +148,114 @@ class Database:
 
                 win_rate = (wins / closed * 100) if closed > 0 else 0.0
 
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM trades WHERE status='lost'"
+                )
+                losses = (await cursor.fetchone())[0]
+
+                cursor = await db.execute(
+                    "SELECT COALESCE(AVG(pnl), 0) FROM trades WHERE pnl IS NOT NULL AND pnl > 0"
+                )
+                avg_win = (await cursor.fetchone())[0]
+
+                cursor = await db.execute(
+                    "SELECT COALESCE(AVG(pnl), 0) FROM trades WHERE pnl IS NOT NULL AND pnl < 0"
+                )
+                avg_loss = (await cursor.fetchone())[0]
+
+                cursor = await db.execute(
+                    "SELECT COALESCE(MAX(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+                )
+                best_trade = (await cursor.fetchone())[0]
+
+                cursor = await db.execute(
+                    "SELECT COALESCE(MIN(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+                )
+                worst_trade = (await cursor.fetchone())[0]
+
                 return {
                     "total_trades": total,
                     "wins": wins,
+                    "losses": losses,
                     "closed": closed,
                     "win_rate": win_rate,
                     "total_pnl": total_pnl,
+                    "avg_win": avg_win,
+                    "avg_loss": avg_loss,
+                    "best_trade": best_trade,
+                    "worst_trade": worst_trade,
                 }
         except Exception as exc:
             logger.error("Failed to get stats: %s", exc)
             return {
-                "total_trades": 0,
-                "wins": 0,
-                "closed": 0,
-                "win_rate": 0.0,
-                "total_pnl": 0.0,
+                "total_trades": 0, "wins": 0, "losses": 0, "closed": 0,
+                "win_rate": 0.0, "total_pnl": 0.0, "avg_win": 0.0,
+                "avg_loss": 0.0, "best_trade": 0.0, "worst_trade": 0.0,
             }
+
+    async def get_pnl_history(self, limit: int = 100) -> list[dict]:
+        try:
+            async with aiosqlite.connect(self._path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT timestamp, pnl, status, asset, timeframe, side, size_usdc, dry_run "
+                    "FROM trades WHERE pnl IS NOT NULL "
+                    "ORDER BY timestamp ASC LIMIT ?",
+                    (limit,),
+                )
+                rows = await cursor.fetchall()
+                result = []
+                cumulative = 0.0
+                for r in rows:
+                    cumulative += r["pnl"]
+                    result.append({
+                        "timestamp": r["timestamp"],
+                        "pnl": r["pnl"],
+                        "cumulative": round(cumulative, 2),
+                        "status": r["status"],
+                        "asset": r["asset"],
+                        "timeframe": r["timeframe"],
+                        "side": r["side"],
+                        "size_usdc": r["size_usdc"],
+                        "dry_run": bool(r["dry_run"]),
+                    })
+                return result
+        except Exception as exc:
+            logger.error("Failed to get P&L history: %s", exc)
+            return []
+
+    async def get_hourly_snapshots(self, hours: int = 24) -> list[dict]:
+        cutoff = time.time() - hours * 3600
+        try:
+            async with aiosqlite.connect(self._path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM portfolio_snapshots "
+                    "WHERE timestamp > ? ORDER BY timestamp ASC",
+                    (cutoff,),
+                )
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("Failed to get hourly snapshots: %s", exc)
+            return []
+
+    async def get_asset_breakdown(self) -> dict:
+        try:
+            async with aiosqlite.connect(self._path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT asset, COUNT(*) as count, "
+                    "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins, "
+                    "COALESCE(SUM(pnl), 0) as pnl "
+                    "FROM trades WHERE status IN ('won', 'lost') "
+                    "GROUP BY asset"
+                )
+                rows = await cursor.fetchall()
+                return {r["asset"]: {"count": r["count"], "wins": r["wins"], "pnl": round(r["pnl"], 2)} for r in rows}
+        except Exception as exc:
+            logger.error("Failed to get asset breakdown: %s", exc)
+            return {}
 
     async def snapshot_portfolio(
         self, value: float, pnl: float, positions: int
@@ -174,14 +267,7 @@ class Database:
                     "INSERT INTO portfolio_snapshots "
                     "(timestamp, portfolio_value, daily_pnl, open_positions, total_trades, win_rate) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        __import__("time").time(),
-                        value,
-                        pnl,
-                        positions,
-                        stats["total_trades"],
-                        stats["win_rate"],
-                    ),
+                    (time.time(), value, pnl, positions, stats["total_trades"], stats["win_rate"]),
                 )
                 await db.commit()
         except Exception as exc:

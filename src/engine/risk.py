@@ -65,9 +65,75 @@ class RiskManager:
     alerted_thresholds: set = field(default_factory=set)
     open_positions: dict = field(default_factory=dict)
 
+    _win_streak: int = 0
+    _loss_streak: int = 0
+    _last_trade_time: float = 0.0
+    _cooldown_until: float = 0.0
+    _session_trades: int = 0
+    _session_wins: int = 0
+    _session_losses: int = 0
+
     def __post_init__(self) -> None:
         if self.daily_start_value <= 0:
             self.daily_start_value = self.settings.initial_portfolio_value
+
+    @property
+    def win_streak(self) -> int:
+        return self._win_streak
+
+    @property
+    def loss_streak(self) -> int:
+        return self._loss_streak
+
+    @property
+    def is_cooling_down(self) -> bool:
+        return time.time() < self._cooldown_until
+
+    @property
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self._cooldown_until - time.time())
+
+    @property
+    def session_stats(self) -> dict:
+        return {
+            "trades": self._session_trades,
+            "wins": self._session_wins,
+            "losses": self._session_losses,
+            "win_streak": self._win_streak,
+            "loss_streak": self._loss_streak,
+            "cooldown_remaining": round(self.cooldown_remaining),
+        }
+
+    def can_trade(self) -> tuple[bool, str]:
+        if self.kill_switch_active:
+            return False, "Kill switch active"
+        if self.is_cooling_down:
+            return False, f"Cooldown: {self.cooldown_remaining:.0f}s remaining"
+        if len(self.open_positions) >= self.settings.max_concurrent_positions:
+            return False, f"Max positions ({self.settings.max_concurrent_positions}) reached"
+        return True, ""
+
+    def record_result(self, won: bool, pnl: float) -> None:
+        self.daily_pnl += pnl
+        self._session_trades += 1
+        self._last_trade_time = time.time()
+
+        if won:
+            self._session_wins += 1
+            self._win_streak += 1
+            self._loss_streak = 0
+        else:
+            self._session_losses += 1
+            self._loss_streak += 1
+            self._win_streak = 0
+
+            if self._loss_streak >= 3:
+                cooldown_secs = min(60 * self._loss_streak, 300)
+                self._cooldown_until = time.time() + cooldown_secs
+                logger.warning(
+                    "Loss streak of %d — cooldown for %ds",
+                    self._loss_streak, cooldown_secs,
+                )
 
     def check_drawdown(self, current_portfolio_value: float) -> bool:
         if self.daily_start_value <= 0:
@@ -113,4 +179,10 @@ class RiskManager:
         self.daily_pnl = 0.0
         self.kill_switch_active = False
         self.alerted_thresholds.clear()
+        self._win_streak = 0
+        self._loss_streak = 0
+        self._cooldown_until = 0.0
+        self._session_trades = 0
+        self._session_wins = 0
+        self._session_losses = 0
         logger.info("Daily risk counters reset, portfolio: $%.2f", portfolio_value)
